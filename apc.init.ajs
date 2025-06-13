@@ -1,0 +1,179 @@
+#! {"lang":"module"}
+
+/*
+    TODO:
+    - Make the config reload without having to reload the entire page
+    - Add URLs filtering to:
+        - anura.net.WebSocket
+        - anura.net.Socket
+        - anura.net.TLSSocket
+        - anura.net.libcurl
+    - Add IP filtering
+    - Add per-app downtime customization
+    - Add global and per-app downtime
+    - Make global downtime block access to whole OS
+    - Prevent blocked apps from being installed via the marketplace
+    - Add a forceInstall list
+    - Add a list of blocked Wisp URLs
+    - Add blockedMarketplaces
+    - Add forceRegistry
+    - Add forceSettings
+    - Add an alternative whitelist for marketplaces, apps, and URls instead of a blacklist
+*/
+
+/*
+    Currently done:
+    - Global downtime
+    - App blocking
+    - URL blocking (anura.net.fetch; works with aboutbrowser)
+*/
+
+// See: https://github.com/MercuryWorkshop/anuraOS/blob/main/documentation/templates/template.init.ajs
+const { need, after } = await anura.import("anura.daemon.helpers");
+
+export const name = "apc";
+export const provides = [];
+export const description = "Anura Parental Controls";
+
+export const depend = async () => {
+    await need("anura.net");
+    await need("anura.notifications");
+    await after("anura.boot");
+};
+
+/*
+Example config:
+{
+    "blocked": ["anura.ashell"], // List of package IDs
+    "urls": ["https://example.com", "discord.com"],
+    "downtime": {
+        "start": "22:00", // 10 PM
+        "end": "07:00" // 7 AM
+    }
+}
+*/
+self.conf = anura.settings.get("apc-conf") || {};
+
+const parseTime = (str) => {
+    const [h, m] = str.split(":").map(Number);
+    return h * 60 + m;
+}; // formatted -> int
+
+const inDowntime = () => {
+    if (
+        !self.conf?.downtime?.start ||
+        !self.conf?.downtime?.end
+    ) {
+        return false;
+    }
+
+    const now = new Date();
+    const current = now.getHours() * 60 + now.getMinutes();
+    const start = parseTime(self.conf.downtime.start);
+    const end = parseTime(self.conf.downtime.end);
+
+    return start < end
+        ? current >= start && current < end
+        : current >= start || current < end;
+}; // boolean
+
+const enforceDowntime = () => {
+    anura.wm.windows.forEach(ref => ref.deref().close()); // Close all (currently open) windows
+
+    Object.entries(anura.apps).forEach(([_pkg, app]) => {
+        if (typeof app.open === "function") {
+            app.open = () => { // "Hijack" open function
+                anura.notifications.add({
+                    title: "Downtime",
+                    description: `All apps are blocked during downtime`,
+                    timeout: 3000,
+                });
+
+                return;
+            };
+        }
+
+        delete app.__proto__.open; // Stupid bypass
+    }); // Upon an app being open, close the window
+};
+
+const run = async () => {
+    if (self.conf == {}) anura.settings.get("apc-conf") || {}; // Attempt to refresh config, I *think* its broken
+
+    Object.entries(anura.apps).forEach(([pkg, app]) => {
+        if (typeof app.open === "function") {
+            const bind = app.open.bind(app); // Og open function
+
+            app.open = (...args) => {
+                if (self.conf.blocked?.includes(pkg)) { // If package ID is blocked
+                    anura.notifications.add({
+                        title: "App Blocked",
+                        description: `The app '${pkg}' is blocked by Anura Parental Controls`,
+                        timeout: 3000,
+                    });
+
+                    delete app.__proto__.open;
+                    return;
+                }
+
+                return bind(...args);
+            };
+        }
+    });
+
+    const netFetch = anura.net.fetch;
+
+    anura.net.fetch = (...args) => {
+        self.conf.urls.forEach((url, i) => { // Convert URLs to hostnames
+            if (url.startsWith("http")) {
+                self.conf.urls[i] = new URL(url).host;
+            }
+        });
+
+        const req = new Request(...args);
+        const host = new URL(req.url).host; // Ex. example.com
+        const pathname = new URL(req.url).pathname; // Ex. /favicon.ico
+
+        if (self.conf.urls.includes(host)) {
+            if (pathname !== "/favicon.ico") { // Stupid and weird
+                anura.notifications.add({
+                    title: "URL Blocked",
+                    description: `The URL '${req.url}' is blocked by Anura Parental Controls`,
+                    timeout: 3000,
+                });
+            }
+
+            return Promise.reject(new Error(`Blocked URL: ${req.url}`));
+        }
+
+        return netFetch(...args);
+    };
+
+    if (inDowntime()) enforceDowntime();
+};  // Main logic
+
+export const start = () => {
+    anura.notifications.add({
+        title: "Anura Parental Controls",
+        description: `Anura Parental Controls is now active`,
+        timeout: 3000,
+    });
+
+    if (inDowntime()) {
+        anura.notifications.add({
+            title: "Downtime",
+            description: `All apps are blocked during downtime`,
+            timeout: 3000,
+        });
+    }
+
+    setInterval(run, 1 * 1000);
+};
+
+export const stop = () => {
+    anura.notifications.add({
+        title: "Anura Parental Controls",
+        description: `Anura Parental Controls is now stopping`,
+        timeout: 3000,
+    });
+};
