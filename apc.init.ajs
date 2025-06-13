@@ -2,7 +2,6 @@
 
 /*
     TODO:
-    - Add IP filtering
     - Add per-app downtime
     - Add global and per-app time limits
     - Prevent blocked apps from being installed via the marketplace
@@ -25,8 +24,9 @@ export const depend = async () => {
 Example config:
 {
     "blocked": {
-        "apps": ["anura.ashell"], // List of package IDs
-        "urls": ["https://example.com", "discord.com"]
+        "packages": ["anura.ashell"], // List of package IDs
+        "domains": ["https://example.com", "discord.com"],
+        "ips": ["152.53.90.161"]
     },
     "downtime": {
         "start": "22:00", // 10 PM
@@ -83,19 +83,30 @@ const enforceDowntime = () => {
 
 const fixUrls = () => {
     self.blocked = [];
+    let i = 0;
 
-    self.conf.blocked?.urls?.forEach((url, i) => {
+    self.conf.blocked?.domains?.forEach((url) => {
         if (
             url.startsWith("http://") ||
             url.startsWith("https://") ||
             url.startsWith("ws://") ||
-            url.startsWith("wss://")
-        ) {
+            url.startsWith("wss://")) {
             self.blocked[i] = new URL(url).host;
+            i++;
         } else {
             self.blocked[i] = url;
+            i++;
         }
     });
+
+    self.conf.blocked?.ips?.forEach((ip) => {
+        self.blocked[i] = ip;
+        i++;
+    });
+};
+
+const isBlocked = (value) => {
+    return self.blocked.includes(value);
 }
 
 const enforceNet = () => {
@@ -121,7 +132,7 @@ const enforceNet = () => {
         constructor(url, protocols) {
             const host = new URL(url.toString()).host;
 
-            if (self.blocked.includes(host)) {
+            if (isBlocked(host)) {
                 notify("WebSocket", url.toString());
                 throw new Error(`Blocked connection to: ${url}`);
             }
@@ -134,7 +145,7 @@ const enforceNet = () => {
         constructor(url, protocols) {
             const host = new URL(url.toString()).host;
 
-            if (self.blocked.includes(host)) {
+            if (isBlocked(host)) {
                 notify("LibCurl WebSocket", url.toString());
                 throw new Error(`Blocked connection to: ${url}`);
             }
@@ -147,7 +158,7 @@ const enforceNet = () => {
         constructor(url, protocols, opts) {
             const host = new URL(url.toString()).host;
 
-            if (self.blocked.includes(host)) {
+            if (isBlocked(host)) {
                 notify("LibCurl CurlWebSocket", url.toString());
                 throw new Error(`Blocked connection to: ${url}`);
             }
@@ -158,7 +169,7 @@ const enforceNet = () => {
 
     anura.net.TLSSocket = class extends NetTLSSocket {
         constructor(host, port, opts) {
-            if (host && self.blocked.includes(host)) {
+            if (host && isBlocked(host)) {
                 notify("TLSSocket", host);
                 throw new Error(`Blocked connection to: ${host}`);
             }
@@ -169,7 +180,7 @@ const enforceNet = () => {
 
     anura.net.libcurl.TLSSocket = class extends LibCurlTLSSocket {
         constructor(host, port, opts) {
-            if (host && self.blocked.includes(host)) {
+            if (host && isBlocked(host)) {
                 notify("LibCurl TLSSocket", host);
                 throw new Error(`Blocked connection to: ${host}`);
             }
@@ -183,7 +194,7 @@ const enforceNet = () => {
         const host = new URL(req.url).host;
         const pathname = new URL(req.url).pathname;
 
-        if (self.blocked.includes(host)) {
+        if (isBlocked(host)) {
             if (pathname !== "/favicon.ico") { // Stupid and weird
                 notify("Fetch", req.url);
             }
@@ -199,7 +210,7 @@ const enforceNet = () => {
         const host = new URL(req.url).host;
         const pathname = new URL(req.url).pathname;
 
-        if (self.blocked.includes(host)) {
+        if (isBlocked(host)) {
             if (pathname !== "/favicon.ico") {
                 notify("LibCurl Fetch", req.url);
             }
@@ -229,7 +240,7 @@ const enforceNet = () => {
                 const host = parsed.host;
                 const pathname = parsed.pathname;
 
-                if (self.blocked.includes(host)) {
+                if (isBlocked(host)) {
                     if (pathname !== "/favicon.ico") {
                         notify("LibCurl HTTPSession", url);
                     }
@@ -251,7 +262,7 @@ const blockApps = () => {
             const bind = app.open.bind(app);
 
             app.open = (...args) => {
-                if (self.conf.blocked?.apps?.includes(pkg)) {
+                if (self.conf.blocked?.packages?.includes(pkg)) {
                     anura.notifications.add({
                         title: "App Blocked",
                         description: `The app '${pkg}' is blocked by Anura Parental Controls`,
@@ -271,6 +282,7 @@ const blockApps = () => {
 const run = async () => {
     if (inDowntime()) enforceDowntime();
     fixUrls();
+    console.log(self.blocked);
     enforceNet();
     blockApps();
 };
@@ -294,12 +306,10 @@ export const start = () => {
         const conf = anura.settings.get("apc-conf") || {};
         const parsed = JSON.stringify(conf);
 
-        if (parsed !== self.cacheConf) {
-            self.conf = conf;
-            self.cacheConf = parsed;
+        self.conf = conf;
+        self.cacheConf = parsed;
 
-            run();
-        }
+        run();
     }, 1000);
 };
 
